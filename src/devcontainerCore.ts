@@ -15,7 +15,7 @@ import {
 export type { DevcontainerConfig };
 
 export type ResolvedDevcontainerContext = {
-  wsFsPath: string;
+  wsUri: vscode.Uri;
   devcontainer: DevcontainerConfig;
   imageName: string;
   containerName: string;
@@ -169,21 +169,21 @@ export function getHostAlias(wsFsPath: string): string {
   return `open-remote-devcontainer-${slug}`;
 }
 
-export function resolveDevcontainerContext(wsFsPath: string): ResolvedDevcontainerContext {
-  const rawConfig = readDevcontainerConfig(wsFsPath);
-  const projectName = path.basename(wsFsPath);
+export function resolveDevcontainerContext(wsUri: vscode.Uri): ResolvedDevcontainerContext {
+  const rawConfig = readDevcontainerConfig(wsUri.fsPath);
+  const projectName = path.basename(wsUri.path);
   const varCtx: VariableContext = {
     localEnv: process.env as Record<string, string | undefined>,
-    localWorkspaceFolder: wsFsPath,
+    localWorkspaceFolder: wsUri.path,
     localWorkspaceFolderBasename: projectName,
     containerWorkspaceFolder: `/workspace/${projectName}`,
   };
   const devcontainer = expandConfigVariables(rawConfig, varCtx);
   return {
-    wsFsPath,
+    wsUri,
     devcontainer,
-    imageName: getImageName(wsFsPath),
-    containerName: getContainerName(wsFsPath),
+    imageName: getImageName(wsUri.fsPath),
+    containerName: getContainerName(wsUri.fsPath),
     baseImage: devcontainer.image || "node:22-bookworm",
     remoteUser: devcontainer.remoteUser,
   };
@@ -303,7 +303,7 @@ async function dockerBuildImage(
 
 async function dockerRestartContainer(
   imageName: string,
-  wsFsPath: string,
+  wsUri: vscode.Uri,
   hostPort: number,
   containerName: string
 ) {
@@ -316,7 +316,7 @@ async function dockerRestartContainer(
 
   vscode.window.showInformationMessage(`Starting container with SSH on localhost:${hostPort}...`);
   getOutput().show(true);
-  const projectName = path.basename(wsFsPath);
+  const projectName = path.basename(wsUri.path);
   await runContainerCommand([
     "run",
     "-d",
@@ -327,7 +327,7 @@ async function dockerRestartContainer(
     "-p",
     `127.0.0.1:${hostPort}:22`,
     "-v",
-    `${wsFsPath}:/workspace/${projectName}`,
+    `${wsUri.path}:/workspace/${projectName}`,
     "-w",
     `/workspace/${projectName}`,
     imageName
@@ -459,7 +459,7 @@ async function createTemporaryDockerfile(
   const lines: string[] = cmds.length ? [marker, ...cmds.map((c) => `RUN ${c}`)] : [];
   const newContent = templateText + (templateText.endsWith("\n") ? "" : "\n") + (lines.length ? lines.join("\n") + "\n" : "");
   const devcontainerDir = path.join(wsFsPath, ".devcontainer");
-  fs.mkdirSync(devcontainerDir, { recursive: true });
+  vscode.workspace.fs.mkdirSync(devcontainerDir, { recursive: true });
   const tempPath = path.join(devcontainerDir, "Dockerfile.open-remote-devcontainer-temp");
   fs.writeFileSync(tempPath, newContent, "utf-8");
   getOutput().appendLine("Prepared temporary Dockerfile with postCreateCommand.");
@@ -468,15 +468,15 @@ async function createTemporaryDockerfile(
 
 async function buildImageWithEntrypoint(
   ctx: vscode.ExtensionContext,
-  wsFsPath: string,
+  wsUri: vscode.Uri,
   imageName: string,
   baseImage: string,
   remoteUser?: string,
   devcontainer?: DevcontainerConfig,
   noCache?: boolean
 ) {
-  await stageEntrypointTemporarily(ctx, wsFsPath);
-  const tempDockerfile = await createTemporaryDockerfile(ctx, wsFsPath, devcontainer);
+  await stageEntrypointTemporarily(ctx, wsUri);
+  const tempDockerfile = await createTemporaryDockerfile(ctx, wsUri, devcontainer);
   try {
     await dockerBuildImage(ctx, wsFsPath, imageName, baseImage, remoteUser, tempDockerfile, noCache);
   } finally {
@@ -502,7 +502,7 @@ export async function rebuildContainer(
   );
   await dockerRestartContainer(
     resolved.imageName,
-    resolved.wsFsPath,
+    resolved.wsUri,
     hostPort,
     resolved.containerName
   );
@@ -543,14 +543,14 @@ export async function rebuildContainerDirect(
     "-d",
     "--name",
     containerName,
-    "--label", `devcontainer.local_folder=${resolved.wsFsPath}`,
+    "--label", `devcontainer.local_folder=${resolved.wsPath}`,
     "--label", `devcontainer.creator=${os.userInfo().username}`,
     "-e",
     `CODIUM_WS=/workspace/${projectName}`,
     "-p",
     `127.0.0.1:${hostPort}:${containerPort}`,
     "-v",
-    `${resolved.wsFsPath}:/workspace/${projectName}`,
+    `${resolved.wsPath}:/workspace/${projectName}`,
     ...extraMountArgs,
     ...extraRunArgs,
     "-w",
