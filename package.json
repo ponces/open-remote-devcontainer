@@ -28,12 +28,13 @@
     "vscode": "^1.85.0"
   },
   "extensionKind": [
-    "ui",
-    "workspace"
+    "workspace",
+    "ui"
   ],
   "activationEvents": [
-    "workspaceContains:.devcontainer/devcontainer.json",
-    "onResolveRemoteAuthority:devcontainer"
+    "onStartupFinished",
+    "onResolveRemoteAuthority:devcontainer",
+    "workspaceContains:.devcontainer/devcontainer.json"
   ],
   "contributes": {
     "commands": [
@@ -43,7 +44,7 @@
       },
       {
         "command": "openremotedevcontainer.openFolderInDevcontainer",
-        "title": "Devcontainer: Open Folder in container"
+        "title": "Devcontainer: Open Folder in Container"
       },
       {
         "command": "openremotedevcontainer.showMenu",
@@ -55,11 +56,11 @@
       },
       {
         "command": "openremotedevcontainer.rebuildAndOpen",
-        "title": "Devcontainer: Rebuild & reopen in container"
+        "title": "Devcontainer: Rebuild & Reopen in Container"
       },
       {
         "command": "openremotedevcontainer.rebuildNoCacheAndOpen",
-        "title": "Devcontainer: Rebuild without cache & reopen in container"
+        "title": "Devcontainer: Rebuild Without Cache & Reopen in Container"
       },
       {
         "command": "openremotedevcontainer.showLog",

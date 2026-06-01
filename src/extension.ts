@@ -6,11 +6,14 @@ import {
   containerExists,
   ensureContainerStarted,
   findFreePort,
-  getDevcontainerPath,
+  getDevcontainerConfig,
+  getDevcontainerDir,
+  hasDevcontainerConfig,
   getOutput,
   getWorkspaceFolder,
   initLog,
   openLogFile,
+  getProjectName,
   makeWorkspaceSlug,
   rebuildContainerDirect,
   resolveDevcontainerContext,
@@ -24,7 +27,7 @@ import {
 } from "./authResolver";
 import { SERVER_PORT } from "./serverInstall";
 
-export function activate(context: vscode.ExtensionContext) {
+export async function activate(context: vscode.ExtensionContext) {
   const resolver = new RemoteDevcontainerResolver(context);
   context.subscriptions.push(
     vscode.workspace.registerRemoteAuthorityResolver(
@@ -36,30 +39,30 @@ export function activate(context: vscode.ExtensionContext) {
 
   async function updateDevcontainerContext() {
     const ws = getWorkspaceFolder();
-    const has = ws ? fs.existsSync(getDevcontainerPath(ws.uri.fsPath)) : false;
+    const has = ws && await hasDevcontainerConfig(ws.uri);
     await vscode.commands.executeCommand("setContext", "openremotedevcontainer.hasConfig", has);
   }
   updateDevcontainerContext();
 
   if (!vscode.env.remoteName) {
     const ws0 = getWorkspaceFolder();
-    if (ws0 && fs.existsSync(getDevcontainerPath(ws0.uri.fsPath))) {
-      vscode.window.showInformationMessage(
-        "Devcontainer configuration detected. Reopen in container?",
-        "Yes",
-        "No"
-      ).then((choice) => {
-        if (choice === "Yes") {
-          vscode.commands.executeCommand("openremotedevcontainer.openFolderInDevcontainer");
-        }
-      });
-    }
+    const has = ws0 && await hasDevcontainerConfig(ws0.uri);
+    if (!has) return;
+    vscode.window.showInformationMessage(
+      "Devcontainer configuration detected. Reopen in container?",
+      "Yes",
+      "No"
+    ).then((choice: string) => {
+      if (choice === "Yes") {
+        vscode.commands.executeCommand("openremotedevcontainer.openFolderInDevcontainer");
+      }
+    });
   }
 
   const ws = getWorkspaceFolder();
   if (ws) {
     const watcher = vscode.workspace.createFileSystemWatcher(
-      new vscode.RelativePattern(ws.uri.fsPath, ".devcontainer/devcontainer.json")
+      new vscode.RelativePattern(ws.uri, ".devcontainer/devcontainer.json")
     );
     watcher.onDidCreate(async () => {
       await updateDevcontainerContext();
@@ -104,8 +107,8 @@ export function activate(context: vscode.ExtensionContext) {
     return ws;
   }
 
-  function getWorkspaceFsPathOrThrow(): string {
-    return getWorkspaceOrThrow().uri.fsPath;
+  function getWorkspaceUriOrThrow(): vscode.Uri {
+    return getWorkspaceOrThrow().uri;
   }
 
   function withUiErrorHandling(
@@ -140,31 +143,32 @@ export function activate(context: vscode.ExtensionContext) {
   async function deferRebuildAndReopenLocally(forceRebuild: boolean, noCache: boolean): Promise<void> {
     const slug = getRemoteSlug();
     if (!slug) { throw new Error("Not connected to a devcontainer"); }
-    const localPath = context.globalState.get<string>(`localPath:${slug}`);
+    const localPath = context.globalState.get<vscode.Uri>(`localPath:${slug}`);
     if (!localPath) { throw new Error(`No local path stored for workspace '${slug}'`); }
     await context.globalState.update("pendingRebuild", { localPath, forceRebuild, noCache });
     await vscode.commands.executeCommand(
       "vscode.openFolder",
-      vscode.Uri.file(localPath),
+      localPath,
       { forceNewWindow: false }
     );
   }
 
   async function openFolderViaResolver(forceRebuild: boolean, noCache = false): Promise<void> {
-    if (getRemoteSlug()) {
+    const slug = getRemoteSlug();
+    if (slug) {
       return deferRebuildAndReopenLocally(forceRebuild, noCache);
     }
-    const wsFsPath = getWorkspaceFsPathOrThrow();
-    const resolved = resolveDevcontainerContext(wsFsPath);
-    const slug = makeWorkspaceSlug(wsFsPath);
-    initLog(slug, "client");
+    const wsUri = getWorkspaceUriOrThrow();
+    const resolved = await resolveDevcontainerContext(wsUri);
+    const wsslug = makeWorkspaceSlug(wsUri);
+    initLog(wsslug, "client");
     const out = getOutput();
 
     const exists = await containerExists(resolved.containerName);
 
     let needsRebuild = forceRebuild;
     if (exists && !forceRebuild) {
-      needsRebuild = await shouldRebuildForDevcontainer(wsFsPath, resolved.containerName);
+      needsRebuild = await shouldRebuildForDevcontainer(wsUri, resolved.containerName);
       if (needsRebuild) {
         const choice = await vscode.window.showWarningMessage(
           "Devcontainer configuration changed. Rebuild?",
@@ -187,11 +191,11 @@ export function activate(context: vscode.ExtensionContext) {
       await ensureContainerStarted(resolved.containerName);
     }
 
-    await context.globalState.update(`localPath:${slug}`, wsFsPath);
+    await context.globalState.update<vscode.Uri>(`localPath:${wsslug}`, wsUri);
 
-    const projectName = path.basename(wsFsPath);
+    const projectName = getProjectName(wsUri);
     const remoteUri = vscode.Uri.parse(
-      `vscode-remote://${getRemoteAuthority(slug)}/workspace/${projectName}`
+      `vscode-remote://${getRemoteAuthority(wsslug)}/workspace/${projectName}`
     );
     out.appendLine(`Opening remote folder: ${remoteUri.toString()}`);
     await vscode.commands.executeCommand("vscode.openFolder", remoteUri, {
@@ -205,12 +209,13 @@ export function activate(context: vscode.ExtensionContext) {
       const ws = getWorkspaceOrThrow();
 
       getOutput().show(true);
-      const devcontainerDir = path.join(ws.uri.fsPath, ".devcontainer");
-      const destDockerfile = path.join(devcontainerDir, "Dockerfile");
+      const devcontainerDir = getDevcontainerDir(ws.uri);
+      const destDockerfile = vscode.Uri.joinPath(devcontainerDir, "Dockerfile");
 
-      fs.mkdirSync(devcontainerDir, { recursive: true });
+      await vscode.workspace.fs.createDirectory(devcontainerDir);
 
-      if (fs.existsSync(destDockerfile)) {
+      try {
+        await vscode.workspace.fs.stat(destDockerfile);
         const choice = await vscode.window.showWarningMessage(
           "A .devcontainer/Dockerfile already exists. Overwrite?",
           { modal: true },
@@ -219,6 +224,8 @@ export function activate(context: vscode.ExtensionContext) {
         if (choice !== "Overwrite") {
           return;
         }
+      } catch {
+        // ignore
       }
 
       const templateUri = vscode.Uri.joinPath(
@@ -236,8 +243,7 @@ export function activate(context: vscode.ExtensionContext) {
       );
       getOutput().appendLine("Template Dockerfile created.");
 
-      const devcontainerJson = path.join(devcontainerDir, "devcontainer.json");
-      if (!fs.existsSync(devcontainerJson)) {
+      if (!ws || await !hasDevcontainerConfig(ws.uri)) {
         vscode.window.showInformationMessage(
           "No devcontainer.json found. The build command expects one in .devcontainer."
         );
@@ -270,11 +276,11 @@ export function activate(context: vscode.ExtensionContext) {
     "openremotedevcontainer.openDevcontainerConfig",
     withUiErrorHandling(async () => {
       const ws = getWorkspaceOrThrow();
-      const cfgPath = getDevcontainerPath(ws.uri.fsPath);
-      if (!fs.existsSync(cfgPath)) {
+      if (!ws || await !hasDevcontainerConfig(ws.uri)) {
         throw new Error(".devcontainer/devcontainer.json not found in this folder");
       }
-      const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(cfgPath));
+      const cfgPath = getDevcontainerConfig(ws.uri);
+      const doc = await vscode.workspace.openTextDocument(cfgPath);
       await vscode.window.showTextDocument(doc, { preview: false });
     }, { appendToOutput: false })
   );
@@ -286,13 +292,13 @@ export function activate(context: vscode.ExtensionContext) {
       if (!slug) {
         throw new Error("Not connected to a devcontainer");
       }
-      const localPath = context.globalState.get<string>(`localPath:${slug}`);
+      const localPath = context.globalState.get<vscode.Uri>(`localPath:${slug}`);
       if (!localPath) {
         throw new Error(`No local path stored for workspace '${slug}'`);
       }
       await vscode.commands.executeCommand(
         "vscode.openFolder",
-        vscode.Uri.file(localPath),
+        localPath,
         { forceNewWindow: false }
       );
     }, { appendToOutput: false })
@@ -327,7 +333,7 @@ export function activate(context: vscode.ExtensionContext) {
     async () => {
       const ws = getWorkspaceFolder();
       const isRemote = vscode.env.remoteName === REMOTE_DEVCONTAINER_AUTHORITY;
-      const has = isRemote || (ws ? fs.existsSync(getDevcontainerPath(ws.uri.fsPath)) : false);
+      const has = isRemote || ws && await hasDevcontainerConfig(ws.uri);
       const runIfHasConfig = async (commandId: string, missingMessage: string) => {
         if (!has) {
           vscode.window.showInformationMessage(missingMessage);
@@ -403,7 +409,7 @@ export function activate(context: vscode.ExtensionContext) {
     showMenu
   );
 
-  const pending = context.globalState.get<{ localPath: string; forceRebuild: boolean; noCache: boolean }>("pendingRebuild");
+  const pending = context.globalState.get<{ localPath: vscode.Uri; forceRebuild: boolean; noCache: boolean }>("pendingRebuild");
   if (pending && !vscode.env.remoteName) {
     context.globalState.update("pendingRebuild", undefined);
     openFolderViaResolver(pending.forceRebuild, pending.noCache).catch((err) => {
