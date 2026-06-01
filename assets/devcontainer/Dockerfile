@@ -14,17 +14,6 @@ RUN apt-get update \
        ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Install SSH
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends openssh-server sudo && \
-    rm -rf /var/lib/apt/lists/*
-
-# Set up SSH
-RUN mkdir -p /var/run/sshd && \
-    echo "PasswordAuthentication no" >> /etc/ssh/sshd_config && \
-  echo "PermitRootLogin prohibit-password" >> /etc/ssh/sshd_config && \
-    echo "PubkeyAuthentication yes" >> /etc/ssh/sshd_config
-
 # Optionally create a non-root dev user when USERNAME is provided via build-arg
 ARG USERNAME
 ARG USER_UID=1000
@@ -50,10 +39,7 @@ RUN set -e; \
         fi; \
       fi; \
       echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers; \
-      mkdir -p /home/$USERNAME/.ssh && chown $USERNAME:$USERNAME /home/$USERNAME/.ssh && chmod 700 /home/$USERNAME/.ssh; \
     fi
-
-EXPOSE 22
 
 # Workdir where the workspace will be mounted
 WORKDIR /workspace
