@@ -18,6 +18,8 @@ import {
 
 export const REMOTE_DEVCONTAINER_AUTHORITY = "devcontainer";
 
+export const REMOTE_WSL_AUTHORITY = "wsl";
+
 export function getRemoteAuthority(slug: string): string {
   return `${REMOTE_DEVCONTAINER_AUTHORITY}+${slug}`;
 }
@@ -27,6 +29,15 @@ export function parseAuthoritySlug(authority: string): string {
   return authority.startsWith(prefix)
     ? authority.slice(prefix.length)
     : authority;
+}
+
+export function isWslRemoteAuthority(authority: string): boolean {
+  return authority.startsWith(`${REMOTE_WSL_AUTHORITY}+`);
+}
+
+export function getWslPathPrefix(authority: string): string {
+  const distro = authority.slice(REMOTE_WSL_AUTHORITY.length + 1);
+  return `\\\\${REMOTE_WSL_AUTHORITY}.localhost\\${distro}`;
 }
 
 export class RemoteDevcontainerResolver
