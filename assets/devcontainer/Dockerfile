@@ -8,7 +8,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        git \
        curl \
-     iproute2 \
+       iproute2 \
        sudo \
        bash \
        ca-certificates \
@@ -45,7 +45,7 @@ RUN set -e; \
 WORKDIR /workspace
 
 # Copy entrypoint from workspace to image and configure as default command
-COPY .devcontainer/entrypoint.sh /usr/local/bin/open-remote-devcontainer-entrypoint
+COPY .devcontainer/entrypoint.sh.open-remote-devcontainer-temp /usr/local/bin/open-remote-devcontainer-entrypoint
 RUN chmod +x /usr/local/bin/open-remote-devcontainer-entrypoint
 
 # Start entrypoint which manages sshd and shutdown

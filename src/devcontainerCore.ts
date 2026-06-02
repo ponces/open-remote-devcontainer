@@ -449,10 +449,24 @@ async function stageEntrypointTemporarily(ctx: vscode.ExtensionContext, wsUri: v
     await vscode.workspace.fs.createDirectory(devcontainerDir);
     let hasMarker = false;
     if (await workspaceFileExists(destEntrypoint)) {
-      const marker = "# Added by openremotedevcontainer: entrypoint";
+      const marker = "# Added by openremotedevcontainer (temp): entrypoint";
       const data = await vscode.workspace.fs.readFile(destEntrypoint);
       const raw = Buffer.from(data).toString("utf-8");
       hasMarker = raw.includes(marker);
+    } else {
+      const templateEntrypoint = getTemplateEntrypointPath(ctx);
+      const content = fs.readFileSync(templateEntrypoint.fsPath);
+      await vscode.workspace.fs.writeFile(destEntrypoint, content);
+      let dockerIgnore = vscode.Uri.joinPath(devcontainerDir, ".dockerignore");
+      if (!await workspaceFileExists(dockerIgnore)) {
+        dockerIgnore = vscode.Uri.joinPath(wsUri, ".dockerignore");
+      }
+      if (await workspaceFileExists(dockerIgnore)) {
+        const data = await vscode.workspace.fs.readFile(dockerIgnore);
+        const raw = Buffer.from(data).toString("utf-8");
+        const newRaw = "!entrypoint.sh.open-remote-devcontainer-temp\n" + raw;
+        await vscode.workspace.fs.writeFile(dockerIgnore, Buffer.from(newRaw, "utf-8"));
+      }
     }
     if (!hasMarker) {
       const templateEntrypoint = getTemplateEntrypointPath(ctx);
@@ -498,8 +512,7 @@ async function createTemporaryDockerfile(
   const devcontainerDir = getDevcontainerDir(wsUri);
   await vscode.workspace.fs.createDirectory(devcontainerDir);
   const tempPath = vscode.Uri.joinPath(devcontainerDir, "Dockerfile.open-remote-devcontainer-temp");
-  const newContentBin = Buffer.from(newContent, "utf-8");
-  await vscode.workspace.fs.writeFile(tempPath, newContentBin);
+  await vscode.workspace.fs.writeFile(tempPath, Buffer.from(newContent, "utf-8"));
   getOutput().appendLine("Prepared temporary Dockerfile with postCreateCommand.");
   return tempPath;
 }
