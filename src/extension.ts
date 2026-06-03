@@ -1,13 +1,8 @@
 import * as vscode from "vscode";
-import * as fs from "fs";
-import * as path from "path";
 import { DevcontainerConfig, parseDevcontainerConfig } from "./devcontainerConfig";
 import {
-  containerExists,
   ensureContainerStarted,
-  findFreePort,
   getDevcontainerConfig,
-  getDevcontainerDir,
   hasDevcontainerConfig,
   getOutput,
   getWorkspaceFolder,
@@ -16,18 +11,18 @@ import {
   getProjectName,
   makeWorkspaceSlug,
   rebuildContainerDirect,
-  resolveDevcontainerContext,
   shouldRebuildForDevcontainer,
+  containerExists,
 } from "./devcontainerCore";
 import {
   RemoteDevcontainerResolver,
   REMOTE_DEVCONTAINER_AUTHORITY,
   getRemoteAuthority,
   parseAuthoritySlug,
+  isWslRemoteAuthority,
 } from "./authResolver";
-import { SERVER_PORT } from "./serverInstall";
 
-export async function activate(context: vscode.ExtensionContext) {
+export function activate(context: vscode.ExtensionContext) {
   const resolver = new RemoteDevcontainerResolver(context);
   context.subscriptions.push(
     vscode.workspace.registerRemoteAuthorityResolver(
@@ -46,17 +41,17 @@ export async function activate(context: vscode.ExtensionContext) {
 
   if (!vscode.env.remoteName) {
     const ws0 = getWorkspaceFolder();
-    const has = ws0 && await hasDevcontainerConfig(ws0.uri);
-    if (!has) return;
-    vscode.window.showInformationMessage(
-      "Devcontainer configuration detected. Reopen in container?",
-      "Yes",
-      "No"
-    ).then((choice: string) => {
-      if (choice === "Yes") {
-        vscode.commands.executeCommand("openremotedevcontainer.openFolderInDevcontainer");
-      }
-    });
+    if (ws0) {
+      hasDevcontainerConfig(ws0.uri).then((has) => has && vscode.window.showInformationMessage(
+        "Devcontainer configuration detected. Reopen in container?",
+        "Yes",
+        "No"
+      ).then((choice: string) => {
+        if (choice === "Yes") {
+          vscode.commands.executeCommand("openremotedevcontainer.openFolderInDevcontainer");
+        }
+      }));
+    }
   }
 
   const ws = getWorkspaceFolder();
@@ -137,7 +132,9 @@ export async function activate(context: vscode.ExtensionContext) {
   function getRemoteSlug(): string | undefined {
     const ws = vscode.workspace.workspaceFolders?.[0];
     if (!ws || ws.uri.scheme !== "vscode-remote") { return undefined; }
-    return parseAuthoritySlug(ws.uri.authority);
+    const authority = parseAuthoritySlug(ws.uri.authority);
+    if (isWslRemoteAuthority(authority)) { return undefined; }
+    return authority;
   }
 
   async function deferRebuildAndReopenLocally(forceRebuild: boolean, noCache: boolean): Promise<void> {
@@ -159,16 +156,19 @@ export async function activate(context: vscode.ExtensionContext) {
       return deferRebuildAndReopenLocally(forceRebuild, noCache);
     }
     const wsUri = getWorkspaceUriOrThrow();
-    const resolved = await resolveDevcontainerContext(wsUri);
     const wsslug = makeWorkspaceSlug(wsUri);
     initLog(wsslug, "client");
     const out = getOutput();
 
-    const exists = await containerExists(resolved.containerName);
+    let containerId = context.globalState.get<string>(`containerId:${wsslug}`);
+    const exists = await containerExists(containerId);
+    if (containerId && exists) {
+      containerId = undefined;
+    }
 
     let needsRebuild = forceRebuild;
-    if (exists && !forceRebuild) {
-      needsRebuild = await shouldRebuildForDevcontainer(wsUri, resolved.containerName);
+    if (containerId && !forceRebuild) {
+      needsRebuild = await shouldRebuildForDevcontainer(wsUri, containerId);
       if (needsRebuild) {
         const choice = await vscode.window.showWarningMessage(
           "Devcontainer configuration changed. Rebuild?",
@@ -183,15 +183,15 @@ export async function activate(context: vscode.ExtensionContext) {
       }
     }
 
-    if (!exists || needsRebuild) {
-      const hostPort = await findFreePort();
+    if (!containerId || needsRebuild) {
       resolver.setForceRebuild(needsRebuild);
-      await rebuildContainerDirect(context, resolved, hostPort, SERVER_PORT, noCache);
+      containerId = await rebuildContainerDirect(wsUri, containerId, noCache);
     } else {
-      await ensureContainerStarted(resolved.containerName);
+      await ensureContainerStarted(containerId);
     }
 
     await context.globalState.update<vscode.Uri>(`localPath:${wsslug}`, wsUri);
+    await context.globalState.update<string>(`containerId:${wsslug}`, containerId);
 
     const projectName = getProjectName(wsUri);
     const remoteUri = vscode.Uri.parse(
@@ -202,54 +202,6 @@ export async function activate(context: vscode.ExtensionContext) {
       forceNewWindow: false,
     });
   }
-
-  const addDockerfileTemplate = vscode.commands.registerCommand(
-    "openremotedevcontainer.addDockerfileTemplate",
-    withUiErrorHandling(async () => {
-      const ws = getWorkspaceOrThrow();
-
-      getOutput().show(true);
-      const devcontainerDir = getDevcontainerDir(ws.uri);
-      const destDockerfile = vscode.Uri.joinPath(devcontainerDir, "Dockerfile");
-
-      await vscode.workspace.fs.createDirectory(devcontainerDir);
-
-      try {
-        await vscode.workspace.fs.stat(destDockerfile);
-        const choice = await vscode.window.showWarningMessage(
-          "A .devcontainer/Dockerfile already exists. Overwrite?",
-          { modal: true },
-          "Overwrite"
-        );
-        if (choice !== "Overwrite") {
-          return;
-        }
-      } catch {
-        // ignore
-      }
-
-      const templateUri = vscode.Uri.joinPath(
-        context.extensionUri,
-        "assets",
-        "devcontainer",
-        "Dockerfile"
-      );
-
-      const template = fs.readFileSync(templateUri.fsPath);
-      fs.writeFileSync(destDockerfile, template);
-
-      vscode.window.showInformationMessage(
-        "Template Dockerfile added to .devcontainer/Dockerfile"
-      );
-      getOutput().appendLine("Template Dockerfile created.");
-
-      if (!ws || await !hasDevcontainerConfig(ws.uri)) {
-        vscode.window.showInformationMessage(
-          "No devcontainer.json found. The build command expects one in .devcontainer."
-        );
-      }
-    })
-  );
 
   const openFolderInDevcontainer = vscode.commands.registerCommand(
     "openremotedevcontainer.openFolderInDevcontainer",
@@ -398,7 +350,6 @@ export async function activate(context: vscode.ExtensionContext) {
   );
 
   context.subscriptions.push(
-    addDockerfileTemplate,
     openFolderInDevcontainer,
     openDevcontainerConfig,
     rebuildAndOpen,
@@ -417,7 +368,9 @@ export async function activate(context: vscode.ExtensionContext) {
     });
   }
 
-  runPostStartCommand();
+  if (vscode.env.remoteName === REMOTE_DEVCONTAINER_AUTHORITY) {
+    runPostStartCommand();
+  }
 }
 
 async function runPostStartCommand() {

@@ -18,6 +18,8 @@ import {
 
 export const REMOTE_DEVCONTAINER_AUTHORITY = "devcontainer";
 
+export const REMOTE_WSL_AUTHORITY = "wsl";
+
 export function getRemoteAuthority(slug: string): string {
   return `${REMOTE_DEVCONTAINER_AUTHORITY}+${slug}`;
 }
@@ -27,6 +29,10 @@ export function parseAuthoritySlug(authority: string): string {
   return authority.startsWith(prefix)
     ? authority.slice(prefix.length)
     : authority;
+}
+
+export function isWslRemoteAuthority(authority: string): boolean {
+  return authority.startsWith(`${REMOTE_WSL_AUTHORITY}+`);
 }
 
 export class RemoteDevcontainerResolver
@@ -45,18 +51,11 @@ export class RemoteDevcontainerResolver
     this.forceRebuild = value;
   }
 
-  showCandidatePort(_host: string, port: number, detail: string): Thenable<boolean> {
-    if (port === SERVER_PORT || port === this.hostPort) return Promise.resolve(false);
-    if (this.serverDataFolder && detail.includes(this.serverDataFolder)) return Promise.resolve(false);
-    return Promise.resolve(true);
-  }
-
   resolve(
     authority: string,
     context: vscode.RemoteAuthorityResolverContext
   ): Thenable<vscode.ResolverResult> {
     const slug = parseAuthoritySlug(authority);
-    const containerName = `open-remote-devcontainer-${slug}`;
 
     initLog(slug, "server");
     const out = getOutput();
@@ -72,8 +71,15 @@ export class RemoteDevcontainerResolver
       },
       async (progress) => {
         try {
+          const containerId = this.extensionContext.globalState.get<string>(`containerId:${slug}`);
+          if (!containerId) {
+            throw new ServerInstallError(
+              `Could not find container for workspace '${slug}'`
+            );
+          }
+          
           progress.report({ message: "Installing server…" });
-          const server = await installServer(containerName);
+          const server = await installServer(containerId);
           this.serverDataFolder = server.dataFolder;
 
           if (server.logFile) {
@@ -81,14 +87,14 @@ export class RemoteDevcontainerResolver
           }
 
           progress.report({ message: "Reading port mapping…" });
-          const hostPort = await getMappedPort(containerName, SERVER_PORT);
+          const hostPort = await getMappedPort(containerId, SERVER_PORT);
           this.hostPort = hostPort;
           out.appendLine(
             `Server listening on container port ${server.port}, mapped to localhost:${hostPort} (token: ${server.connectionToken.slice(0, 8)}…)`
           );
 
           const idRes = await runContainerCommandCapture([
-            "inspect", "--format", "{{.Id}}", containerName,
+            "inspect", "--format", "{{.Id}}", containerId,
           ]);
           const shortId = idRes.stdout.trim().slice(0, 7);
 

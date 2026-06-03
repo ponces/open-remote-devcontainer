@@ -2,7 +2,6 @@ import * as crypto from "crypto";
 import { getVSCodeServerConfig } from "./serverConfig";
 import { runContainerCommandCapture } from "./devcontainerCore";
 
-
 export const SERVER_PORT = 65120;
 
 export interface ServerInstallConfig {
@@ -32,7 +31,7 @@ export interface ServerInstallResult {
 
 export interface ContainerRun {
   run(
-    containerName: string,
+    containerId: string,
     command: string[]
   ): Promise<{ stdout: string; stderr: string; code: number }>;
 }
@@ -111,13 +110,13 @@ export function extractServerResult(
 }
 
 export async function installServerInContainer(
-  containerName: string,
+  containerId: string,
   config: ServerInstallConfig,
   executor: ContainerRun
 ): Promise<ServerInstallResult> {
   const script = generateBashInstallScript(config);
 
-  const { stdout, stderr, code } = await executor.run(containerName, [
+  const { stdout, stderr, code } = await executor.run(containerId, [
     "bash",
     "-c",
     script,
@@ -141,14 +140,14 @@ export async function installServerInContainer(
 
 export function makeContainerExec(): ContainerRun {
   return {
-    run(containerName, command) {
-      return runContainerCommandCapture(["exec", containerName, ...command]);
+    run(containerId, command) {
+      return runContainerCommandCapture(["exec", containerId, ...command]);
     },
   };
 }
 
 export async function installServer(
-  containerName: string
+  containerId: string
 ): Promise<ServerInstallResult> {
   const serverConfig = await getVSCodeServerConfig();
 
@@ -171,7 +170,7 @@ export async function installServer(
     envVariables: [],
   };
 
-  const result = await installServerInContainer(containerName, config, makeContainerExec());
+  const result = await installServerInContainer(containerId, config, makeContainerExec());
   result.dataFolder = devcontainerFolder;
   return result;
 }

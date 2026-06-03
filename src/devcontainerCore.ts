@@ -4,24 +4,7 @@ import * as os from "os";
 import * as path from "path";
 import { spawn } from "child_process";
 import * as net from "net";
-import {
-  DevcontainerConfig,
-  VariableContext,
-  parseDevcontainerConfig,
-  expandConfigVariables,
-  mountsToDockerArgs,
-} from "./devcontainerConfig";
-
-export type { DevcontainerConfig };
-
-export type ResolvedDevcontainerContext = {
-  wsUri: vscode.Uri;
-  devcontainer: DevcontainerConfig;
-  imageName: string;
-  containerName: string;
-  baseImage: string;
-  remoteUser: string | undefined;
-};
+import JSON5 from "json5";
 
 export function getWorkspaceFolder(): vscode.WorkspaceFolder | undefined {
   return vscode.workspace.workspaceFolders?.[0];
@@ -51,26 +34,6 @@ export async function workspaceFileExists(fileUri: vscode.Uri): Promise<boolean>
 export async function hasDevcontainerConfig(wsUri: vscode.Uri): Promise<boolean> {
   const devContainerConfig = getDevcontainerConfig(wsUri);
   return await workspaceFileExists(devContainerConfig);
-}
-
-export async function readDevcontainerConfig(wsUri: vscode.Uri): Promise<DevcontainerConfig | undefined> {
-  if (!hasDevcontainerConfig(wsUri)) return undefined;
-  const devContainerConfig = getDevcontainerConfig(wsUri);
-  try {
-    const data = await vscode.workspace.fs.readFile(devContainerConfig);
-    const raw = Buffer.from(data).toString("utf-8");
-    return parseDevcontainerConfig(raw);
-  } catch {
-    return undefined;
-  }
-}
-
-function getTemplateDockerfilePath(ctx: vscode.ExtensionContext): vscode.Uri {
-  return vscode.Uri.joinPath(ctx.extensionUri, "assets", "devcontainer", "Dockerfile");
-}
-
-function getTemplateEntrypointPath(ctx: vscode.ExtensionContext): vscode.Uri {
-  return vscode.Uri.joinPath(ctx.extensionUri, "assets", "devcontainer", "entrypoint.sh");
 }
 
 let outputChannel: vscode.OutputChannel | undefined;
@@ -183,40 +146,9 @@ export function makeWorkspaceSlug(wsUri: vscode.Uri): string {
   return slug || "workspace";
 }
 
-export function getImageName(wsUri: vscode.Uri): string {
+export function getContainerImagePrefix(wsUri: vscode.Uri): string {
   const slug = makeWorkspaceSlug(wsUri);
-  return `open-remote-devcontainer-${slug}`;
-}
-
-export function getContainerName(wsUri: vscode.Uri): string {
-  const slug = makeWorkspaceSlug(wsUri);
-  return `open-remote-devcontainer-${slug}`;
-}
-
-export function getHostAlias(wsUri: vscode.Uri): string {
-  const slug = makeWorkspaceSlug(wsUri);
-  return `open-remote-devcontainer-${slug}`;
-}
-
-export async function resolveDevcontainerContext(wsUri: vscode.Uri): Promise<ResolvedDevcontainerContext> {
-  const rawConfig = await readDevcontainerConfig(wsUri);
-  if (!rawConfig) throw new Error("No devcontainer.json found");
-  const projectName = getProjectName(wsUri);
-  const varCtx: VariableContext = {
-    localEnv: process.env as Record<string, string | undefined>,
-    localWorkspaceFolder: wsUri.fsPath,
-    localWorkspaceFolderBasename: projectName,
-    containerWorkspaceFolder: `/workspace/${projectName}`,
-  };
-  const devcontainer = expandConfigVariables(rawConfig, varCtx);
-  return {
-    wsUri,
-    devcontainer,
-    imageName: getImageName(wsUri),
-    containerName: getContainerName(wsUri),
-    baseImage: devcontainer.image || "node:22-bookworm",
-    remoteUser: devcontainer.remoteUser,
-  };
+  return `vsc-${slug}`;
 }
 
 export function runCommand(
@@ -256,18 +188,49 @@ export function getContainerExtraArgs(): string[] {
   return config.get<string[]>("containerExtraArgs") ?? [];
 }
 
-export function runContainerCommand(
+export function getDevcontainerBinary(): string {
+  const config = vscode.workspace.getConfiguration("remote.devcontainer");
+  return config.get<string>("devcontainerBinary") || "devcontainer";
+}
+
+export function getDevcontainerExtraArgs(): string[] {
+  const config = vscode.workspace.getConfiguration("remote.devcontainer");
+  return config.get<string[]>("devcontainerExtraArgs") ?? [];
+}
+
+export function getDevcontainerBinaryPath(): string {
+  const config = vscode.workspace.getConfiguration("remote.devcontainer");
+  return config.get<string>("devcontainerBinaryPath") || path.join(getHomeDir(), ".devcontainers", "bin");
+}
+
+export async function runContainerCommand(
   args: string[],
   options?: { cwd?: string; env?: NodeJS.ProcessEnv; input?: string }
 ): Promise<void> {
-  return runCommand(getContainerBinary(), [...getContainerExtraArgs(), ...args], options);
+  return await runCommand(getContainerBinary(), [...getContainerExtraArgs(), ...args], options);
 }
 
-export function runContainerCommandCapture(
+export async function runContainerCommandCapture(
   args: string[],
   options?: { cwd?: string; env?: NodeJS.ProcessEnv }
 ): Promise<{ stdout: string; stderr: string; code: number }> {
-  return runCommandCapture(getContainerBinary(), [...getContainerExtraArgs(), ...args], options);
+  return await runCommandCapture(getContainerBinary(), [...getContainerExtraArgs(), ...args], options);
+}
+
+export async function runDevcontainerCommand(
+  args: string[],
+  options?: { cwd?: string; env?: NodeJS.ProcessEnv; input?: string }
+): Promise<void> {
+  const absolutePath = path.join(getDevcontainerBinaryPath(), getDevcontainerBinary());
+  return await runCommand(absolutePath, [...getDevcontainerExtraArgs(), ...args], options);
+}
+
+export async function runDevcontainerCommandCapture(
+  args: string[],
+  options?: { cwd?: string; env?: NodeJS.ProcessEnv }
+): Promise<{ stdout: string; stderr: string; code: number }> {
+  const absolutePath = path.join(getDevcontainerBinaryPath(), getDevcontainerBinary());
+  return await runCommandCapture(absolutePath, [...getDevcontainerExtraArgs(), ...args], options);
 }
 
 export async function runCommandCapture(
@@ -300,117 +263,48 @@ export async function runCommandCapture(
   });
 }
 
-async function dockerBuildImage(
-  ctx: vscode.ExtensionContext,
-  wsUri: vscode.Uri,
-  imageName: string,
-  baseImage: string,
-  remoteUser?: string,
-  dockerfilePath?: vscode.Uri,
-  noCache?: boolean
-) {
-  const dockerfileToUse = dockerfilePath || getTemplateDockerfilePath(ctx);
-  const args = [
-    "build",
-    "-t",
-    imageName,
-    "-f",
-    dockerfileToUse.fsPath,
-    "--build-arg",
-    `BASE_IMAGE=${baseImage}`
-  ];
+async function devcontainerUp(wsUri: vscode.Uri, noCache?: boolean) {
+  const args = ["up"];
   if (noCache) {
-    args.push("--no-cache");
+    args.push("--build-no-cache");
   }
-  if (remoteUser) {
-    args.push("--build-arg", `USERNAME=${remoteUser}`);
-  }
-  args.push(wsUri.fsPath);
   vscode.window.showInformationMessage("Building devcontainer image...");
   getOutput().show(true);
-  await runContainerCommand(args);
+  const res = await runDevcontainerCommandCapture(args, { cwd: wsUri.fsPath });
+  if (res.code !== 0) {
+    throw new Error(`Could not start container: ${res.stderr}`);
+  }
+  return JSON5.parse(res.stdout).containerId;
 }
 
-async function dockerRestartContainer(
-  imageName: string,
-  wsUri: vscode.Uri,
-  hostPort: number,
-  containerName: string
-) {
-  try {
-    await runContainerCommand(["stop", containerName]);
-  } catch {}
-  try {
-    await runContainerCommand(["rm", "-f", containerName]);
-  } catch {}
-
-  vscode.window.showInformationMessage(`Starting container with SSH on localhost:${hostPort}...`);
-  getOutput().show(true);
-  const projectName = getProjectName(wsUri);
-  await runContainerCommand([
-    "run",
-    "-d",
-    "--name",
-    containerName,
-    "-e",
-    `CODIUM_WS=/workspace/${projectName}`,
-    "-p",
-    `127.0.0.1:${hostPort}:22`,
-    "-v",
-    `${wsUri.fsPath}:/workspace/${projectName}`,
-    "-w",
-    `/workspace/${projectName}`,
-    imageName
-  ]);
-}
-
-export async function containerExists(name: string): Promise<boolean> {
-  const res = await runContainerCommandCapture(["container", "inspect", name]);
-  return res.code === 0;
-}
-
-async function getMappedSshPort(name: string): Promise<number | undefined> {
+export async function getMappedPort(id: string, containerPort: number): Promise<number> {
   const res = await runContainerCommandCapture([
-    "container", "inspect",
-    "-f",
-    "{{ (index (index .NetworkSettings.Ports \"22/tcp\") 0).HostPort }}",
-    name
-  ]);
-  if (res.code !== 0) return undefined;
-  const portStr = res.stdout.trim();
-  const port = Number(portStr);
-  return Number.isFinite(port) ? port : undefined;
-}
-
-export async function getMappedPort(name: string, containerPort: number): Promise<number> {
-  const res = await runContainerCommandCapture([
-    "port", name, `${containerPort}/tcp`
+    "port", id, `${containerPort}/tcp`
   ]);
   if (res.code !== 0) {
-    throw new Error(`Could not get port mapping for ${name}: ${res.stderr.trim()}`);
+    throw new Error(`Could not get port mapping for ${id}: ${res.stderr.trim()}`);
   }
   // Output is like "0.0.0.0:12345" or "127.0.0.1:12345"
   const match = res.stdout.trim().match(/:(\d+)$/m);
   if (!match) {
-    throw new Error(`No port mapping found for ${containerPort}/tcp on ${name}`);
+    throw new Error(`No port mapping found for ${containerPort}/tcp on ${id}`);
   }
   return Number(match[1]);
 }
 
-export async function ensureContainerStarted(name: string): Promise<void> {
-  await runContainerCommand(["start", name]).catch(async () => {
-    await runContainerCommand(["restart", name]).catch(() => {});
+export async function ensureContainerStarted(id: string): Promise<void> {
+  await runContainerCommand(["start", id]).catch(async () => {
+    await runContainerCommand(["restart", id]).catch(() => {});
   });
 }
 
-async function isContainerRunning(name: string): Promise<boolean> {
-  const res = await runContainerCommandCapture([
-    "container", "inspect",
-    "-f",
-    "{{.State.Running}}",
-    name
-  ]);
-  return res.code === 0 && res.stdout.trim() === "true";
+export async function containerExists(id: string): Promise<boolean> {
+  try {
+    await runContainerCommand(["inspect", id]);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function getDevcontainerMtimeMs(wsUri: vscode.Uri): Promise<number | undefined> {
@@ -442,237 +336,14 @@ export async function shouldRebuildForDevcontainer(wsUri: vscode.Uri, name: stri
   return dcMtime !== undefined && createdMs !== undefined && dcMtime > createdMs;
 }
 
-async function stageEntrypointTemporarily(ctx: vscode.ExtensionContext, wsUri: vscode.Uri) {
-  try {
-    const devcontainerDir = getDevcontainerDir(wsUri);
-    const destEntrypoint = vscode.Uri.joinPath(devcontainerDir, "entrypoint.sh");
-    await vscode.workspace.fs.createDirectory(devcontainerDir);
-    let hasMarker = false;
-    if (await workspaceFileExists(destEntrypoint)) {
-      const marker = "# Added by openremotedevcontainer: entrypoint";
-      const data = await vscode.workspace.fs.readFile(destEntrypoint);
-      const raw = Buffer.from(data).toString("utf-8");
-      hasMarker = raw.includes(marker);
-    }
-    if (!hasMarker) {
-      const templateEntrypoint = getTemplateEntrypointPath(ctx);
-      const content = fs.readFileSync(templateEntrypoint.fsPath);
-      await vscode.workspace.fs.writeFile(destEntrypoint, content);
-      getOutput().appendLine("Staged entrypoint.sh in .devcontainer for build.");
-    }
-  } catch (e: any) {
-    getOutput().appendLine(`Failed to stage entrypoint.sh: ${e?.message ?? e}`);
+export async function rebuildContainerDirect(wsUri: vscode.Uri, id: string | undefined, noCache?: boolean): Promise<string> {
+  if (id) {
+    getOutput().appendLine(`Ensuring container ${id} is stopped...`);
+    getOutput().show(true);
+    await runContainerCommand(["stop", id]);
+    await runContainerCommand(["rm", "-f", id]);
   }
-}
-
-async function cleanupEntrypointIfManaged(wsUri: vscode.Uri) {
-  try {
-    const devcontainerDir = getDevcontainerDir(wsUri);
-    const destEntrypoint = vscode.Uri.joinPath(devcontainerDir, "entrypoint.sh");
-    if (await workspaceFileExists(destEntrypoint)) {
-      const marker = "# Added by openremotedevcontainer: entrypoint";
-      const data = await vscode.workspace.fs.readFile(destEntrypoint);
-      const raw = Buffer.from(data).toString("utf-8");
-      if (raw.includes(marker)) {
-        await vscode.workspace.fs.delete(destEntrypoint);
-        getOutput().appendLine("Cleaned up staged entrypoint.sh from workspace.");
-      }
-    }
-  } catch (e: any) {
-    getOutput().appendLine(`Failed to cleanup entrypoint.sh: ${e?.message ?? e}`);
-  }
-}
-
-async function createTemporaryDockerfile(
-  ctx: vscode.ExtensionContext,
-  wsUri: vscode.Uri,
-  devcontainer: DevcontainerConfig | undefined
-): Promise<vscode.Uri> {
-  const templatePath = getTemplateDockerfilePath(ctx);
-  const templateText = fs.readFileSync(templatePath.fsPath, "utf-8");
-  const post = devcontainer?.postCreateCommand;
-  const marker = "# Added by openremotedevcontainer (temp): postCreateCommand";
-  const cmds: string[] = !post ? [] : (Array.isArray(post) ? post : [post]);
-  const lines: string[] = cmds.length ? [marker, ...cmds.map((c) => `RUN ${c}`)] : [];
-  const newContent = templateText + (templateText.endsWith("\n") ? "" : "\n") + (lines.length ? lines.join("\n") + "\n" : "");
-  const devcontainerDir = getDevcontainerDir(wsUri);
-  await vscode.workspace.fs.createDirectory(devcontainerDir);
-  const tempPath = vscode.Uri.joinPath(devcontainerDir, "Dockerfile.open-remote-devcontainer-temp");
-  const newContentBin = Buffer.from(newContent, "utf-8");
-  await vscode.workspace.fs.writeFile(tempPath, newContentBin);
-  getOutput().appendLine("Prepared temporary Dockerfile with postCreateCommand.");
-  return tempPath;
-}
-
-async function buildImageWithEntrypoint(
-  ctx: vscode.ExtensionContext,
-  wsUri: vscode.Uri,
-  imageName: string,
-  baseImage: string,
-  remoteUser?: string,
-  devcontainer?: DevcontainerConfig,
-  noCache?: boolean
-) {
-  await stageEntrypointTemporarily(ctx, wsUri);
-  const tempDockerfile = await createTemporaryDockerfile(ctx, wsUri, devcontainer);
-  try {
-    await dockerBuildImage(ctx, wsUri, imageName, baseImage, remoteUser, tempDockerfile, noCache);
-  } finally {
-    await cleanupEntrypointIfManaged(wsUri);
-    if (tempDockerfile && await workspaceFileExists(tempDockerfile)) {
-      await vscode.workspace.fs.delete(tempDockerfile);
-    }
-  }
-}
-
-export async function rebuildContainer(
-  ctx: vscode.ExtensionContext,
-  resolved: ResolvedDevcontainerContext,
-  hostPort: number
-) {
-  await buildImageWithEntrypoint(
-    ctx,
-    resolved.wsUri,
-    resolved.imageName,
-    resolved.baseImage,
-    resolved.remoteUser,
-    resolved.devcontainer
-  );
-  await dockerRestartContainer(
-    resolved.imageName,
-    resolved.wsUri,
-    hostPort,
-    resolved.containerName
-  );
-}
-
-export async function rebuildContainerDirect(
-  ctx: vscode.ExtensionContext,
-  resolved: ResolvedDevcontainerContext,
-  hostPort: number,
-  containerPort: number,
-  noCache?: boolean
-) {
-  await buildImageWithEntrypoint(
-    ctx,
-    resolved.wsUri,
-    resolved.imageName,
-    resolved.baseImage,
-    resolved.remoteUser,
-    resolved.devcontainer,
-    noCache
-  );
-
-  const containerName = resolved.containerName;
-  try {
-    await runContainerCommand(["stop", containerName]);
-  } catch {}
-  try {
-    await runContainerCommand(["rm", "-f", containerName]);
-  } catch {}
-
-  const projectName = getProjectName(resolved.wsUri);
-  getOutput().appendLine(`Starting container ${containerName} (port ${hostPort}:${containerPort})...`);
+  getOutput().appendLine(`Starting container...`);
   getOutput().show(true);
-  const extraMountArgs = mountsToDockerArgs(resolved.devcontainer.mounts ?? []);
-  const extraRunArgs = resolved.devcontainer.runArgs ?? [];
-  await runContainerCommand([
-    "run",
-    "-d",
-    "--name",
-    containerName,
-    "--label", `devcontainer.local_folder=${resolved.wsUri.path}`,
-    "--label", `devcontainer.creator=${os.userInfo().username}`,
-    "-e",
-    `CODIUM_WS=/workspace/${projectName}`,
-    "-p",
-    `127.0.0.1:${hostPort}:${containerPort}`,
-    "-v",
-    `${resolved.wsUri.path}:/workspace/${projectName}`,
-    ...extraMountArgs,
-    ...extraRunArgs,
-    "-w",
-    `/workspace/${projectName}`,
-    "--entrypoint", "sleep",
-    resolved.imageName,
-    "infinity",
-  ]);
-}
-
-export async function ensureContainerReadyAndGetPort(
-  ctx: vscode.ExtensionContext,
-  wsUri: vscode.Uri,
-  resolved: ResolvedDevcontainerContext,
-  forceRebuild: boolean
-): Promise<{ port: number; containerName: string; imageName: string }> {
-  const containerName = resolved.containerName;
-  const imageName = resolved.imageName;
-  const exists = await containerExists(containerName);
-  let shouldRebuild = forceRebuild;
-  let port: number | undefined;
-
-  if (exists) {
-    if (!forceRebuild) {
-      const rebuildNeeded = await shouldRebuildForDevcontainer(wsUri, containerName);
-      shouldRebuild = rebuildNeeded;
-      if (rebuildNeeded) {
-        const choice = await vscode.window.showWarningMessage(
-          "Devcontainer configuration changed since container creation. How would you like to proceed?",
-          { modal: true },
-          "Rebuild",
-          "Reuse"
-        );
-        if (!choice) {
-          throw new Error("Operation cancelled");
-        }
-        shouldRebuild = choice === "Rebuild";
-        getOutput().appendLine(`Decision: ${shouldRebuild ? "Rebuild" : "Reuse"} existing container.`);
-      }
-    }
-
-    await ensureContainerStarted(containerName);
-    port = await getMappedSshPort(containerName);
-    if (!port && !shouldRebuild) {
-      vscode.window.showWarningMessage(
-        "Could not detect mapped SSH port for the running container. Rebuilding to allocate a new port."
-      );
-      shouldRebuild = true;
-    }
-
-    if (shouldRebuild || !port) {
-      const running = await isContainerRunning(containerName);
-      if (running) {
-        const choice2 = await vscode.window.showWarningMessage(
-          "Container is currently running. How would you like to proceed?",
-          { modal: true },
-          "Kill & Rebuild",
-          "Reuse"
-        );
-        if (!choice2) {
-          throw new Error("Operation cancelled");
-        }
-        if (choice2 === "Reuse") {
-          shouldRebuild = false;
-          getOutput().appendLine("Decision: Reuse running container.");
-          await ensureContainerStarted(containerName);
-          port = await getMappedSshPort(containerName);
-          if (!port) {
-            vscode.window.showWarningMessage(
-              "Could not detect mapped SSH port for the running container. Rebuilding to allocate a new port."
-            );
-            shouldRebuild = true;
-          }
-        }
-      }
-    }
-  } else {
-    shouldRebuild = true;
-  }
-
-  if (shouldRebuild || !port) {
-    port = port ?? (await findFreePort());
-    await rebuildContainer(ctx, resolved, port);
-  }
-
-  return { port: port!, containerName, imageName };
+  return await devcontainerUp(wsUri, noCache);
 }

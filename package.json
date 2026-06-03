@@ -39,10 +39,6 @@
   "contributes": {
     "commands": [
       {
-        "command": "openremotedevcontainer.addDockerfileTemplate",
-        "title": "Devcontainer: Add Dockerfile Template"
-      },
-      {
         "command": "openremotedevcontainer.openFolderInDevcontainer",
         "title": "Devcontainer: Open Folder in Container"
       },
@@ -165,6 +161,23 @@
           },
           "default": [],
           "description": "Extra arguments passed to the container binary before the subcommand, e.g. ['--root', '/custom/storage']."
+        },
+        "remote.devcontainer.devcontainerBinary": {
+          "type": "string",
+          "default": "devcontainer",
+          "description": "Dev Container binary to use, e.g. 'devcontainer' or 'crib'."
+        },
+        "remote.devcontainer.devcontainerExtraArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Extra arguments passed to the devcontainer binary before the subcommand, e.g. ['--config', '.custom/devcontainer.json']."
+        },
+        "remote.devcontainer.devcontainerBinaryPath": {
+          "type": "string",
+          "description": "Dev Container binary path to use, e.g. '/home/<user>/.devcontainers/bin'."
         }
       }
     }
